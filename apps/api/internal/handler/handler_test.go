@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/sorolens/sorolens/apps/api/internal/config"
 	"github.com/sorolens/sorolens/apps/api/internal/handler"
 	"github.com/sorolens/sorolens/apps/api/internal/router"
 	"time"
@@ -29,7 +30,7 @@ func newTestHandler(ms *store.MockStore, dbHealthy, redisHealthy bool) http.Hand
 		RedisClient: &mockRedisClient{},
 		Logger: logger,
 	}
-	return router.New(h)
+	return router.New(h, config.DefaultRequestMaxBodyBytes)
 }
 
 // seedRoleStore returns a MockStore with an admin and a contributor user so

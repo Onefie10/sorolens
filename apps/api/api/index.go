@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/exaring/otelpgx"
 	"github.com/redis/go-redis/v9"
+	apiconfig "github.com/sorolens/sorolens/apps/api/internal/config"
 	sorohandler "github.com/sorolens/sorolens/apps/api/internal/handler"
 	"github.com/sorolens/sorolens/apps/api/internal/router"
 	"github.com/sorolens/sorolens/apps/api/internal/store"
@@ -56,7 +57,13 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			Redis:  &redisPinger{client: redisClient},
 			Logger: logger,
 		}
-		handler = router.New(h)
+		maxBodyBytes := apiconfig.DefaultRequestMaxBodyBytes
+		if n, err := apiconfig.MaxBodyBytesFromEnv(); err != nil {
+			logger.Error("request body limit", "err", err)
+		} else {
+			maxBodyBytes = n
+		}
+		handler = router.New(h, maxBodyBytes)
 	})
 
 	if handler == nil {
