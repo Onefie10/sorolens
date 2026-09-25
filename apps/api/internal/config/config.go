@@ -53,9 +53,12 @@ type Config struct {
 	// startup. The user is keyed by this value as both its ID and GitHub ID so
 	// requests authenticated with X-User-ID or X-GitHub-ID resolve to it.
 	InitialAdminGitHubID string
-	// RequestMaxBodyBytes is the largest request body the API will read, in
-	// bytes. Larger bodies are rejected with 413 Payload Too Large.
-	RequestMaxBodyBytes int64
+	// CacheTTL is the lifetime of cached GET responses (API_CACHE_TTL,
+	// default 30s). Zero disables the response cache.
+	CacheTTL time.Duration
+	// SlackSigningSecret verifies Slack slash command requests
+	// (SLACK_SIGNING_SECRET). Empty disables the Slack command endpoint.
+	SlackSigningSecret string
 }
 
 // Load reads configuration from environment variables and returns an error
@@ -71,6 +74,7 @@ func Load() (*Config, error) {
 		Port:                 getEnvDefault("PORT", "8080"),
 		LogLevel:             getEnvDefault("LOG_LEVEL", "info"),
 		InitialAdminGitHubID: os.Getenv("INITIAL_ADMIN_GITHUB_ID"),
+		SlackSigningSecret:   os.Getenv("SLACK_SIGNING_SECRET"),
 	}
 
 	pollStr := getEnvDefault("INDEXER_POLL_INTERVAL", "5m")
@@ -94,11 +98,12 @@ func Load() (*Config, error) {
 	}
 	cfg.IndexerMaxDuration = maxDur
 
-	maxBody, err := MaxBodyBytesFromEnv()
-	if err != nil {
-		return nil, err
+	cacheTTLStr := getEnvDefault("API_CACHE_TTL", "30s")
+	cacheTTL, err := time.ParseDuration(cacheTTLStr)
+	if err != nil || cacheTTL < 0 {
+		return nil, fmt.Errorf("API_CACHE_TTL: invalid duration %q", cacheTTLStr)
 	}
-	cfg.RequestMaxBodyBytes = maxBody
+	cfg.CacheTTL = cacheTTL
 
 	var missing []string
 	if cfg.DatabaseURL == "" {
