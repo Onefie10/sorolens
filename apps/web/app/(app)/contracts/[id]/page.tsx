@@ -10,6 +10,8 @@ import {
   getContractStorage,
   getContractStats,
   getContractSnapshot,
+  addContractTag,
+  removeContractTag,
   ApiError,
 } from "@/lib/api";
 import type {
@@ -17,17 +19,32 @@ import type {
   ContractEvent,
   StorageEntry,
   StatsResponse,
+  ResourceTrendPoint,
   TimeWindow,
 } from "@/lib/types";
+import { getUserId } from "@/lib/user";
 import { StatCard } from "@/components/StatCard";
-import { CardSkeleton, ChartSkeleton, TableSkeleton } from "@/components/Skeleton";
+import { TagInput } from "@/components/TagInput";
+import {
+  CardSkeleton,
+  ChartSkeleton,
+  TableSkeleton,
+} from "@/components/Skeleton";
 import { WindowSelector } from "@/components/WindowSelector";
 import { EventVolumeChart } from "@/components/EventVolumeChart";
 import { InvocationChart } from "@/components/InvocationChart";
+import { ResourceTrendChart } from "@/components/ResourceTrendChart";
+import { getResourceTrend } from "@/lib/resourceTrend";
 import { EventsTable } from "@/components/EventsTable";
 import { StoragePanel } from "@/components/StoragePanel";
+import { ContractNotesPanel } from "@/components/ContractNotesPanel";
 import { SnapshotPanel } from "@/components/SnapshotPanel";
+import { ContractSummaryCard } from "@/components/ContractSummaryCard";
 import { HealthScoreCard } from "@/components/HealthScoreCard";
+import { AddToGroup } from "@/components/AddToGroup";
+import { VerifiedBadge } from "@/components/VerifiedBadge";
+import { CallTracePanel } from "@/components/CallTracePanel";
+import { ContractChangelogPanel } from "@/components/ContractChangelogPanel";
 import { useEventStream } from "@/hooks/useEventStream";
 
 interface Props {
@@ -44,14 +61,23 @@ function ContractDetailContent({ id }: { id: string }) {
   const [contractError, setContractError] = useState<string | null>(null);
   const [contractLoading, setContractLoading] = useState(true);
 
+  // User-defined tags are edited inline on this page.
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagError, setTagError] = useState<string | null>(null);
+  const [tagSaving, setTagSaving] = useState(false);
+
   const [window, setWindow] = useState<TimeWindow>("7d");
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
+
+  const [trend, setTrend] = useState<ResourceTrendPoint[]>([]);
+  const [trendLoading, setTrendLoading] = useState(true);
 
   const [events, setEvents] = useState<ContractEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(true);
   const [eventsCursor, setEventsCursor] = useState<string | null>(null);
   const [eventsHasMore, setEventsHasMore] = useState(false);
+  const [showFailedOnly, setShowFailedOnly] = useState(false);
 
   const [storage, setStorage] = useState<StorageEntry[]>([]);
   const [storageLoading, setStorageLoading] = useState(true);
@@ -75,7 +101,10 @@ function ContractDetailContent({ id }: { id: string }) {
     async function load() {
       try {
         const data = await getContract(id);
-        if (!cancelled) setContract(data);
+        if (!cancelled) {
+          setContract(data);
+          setTags(data.tags ?? []);
+        }
       } catch (err) {
         if (!cancelled) {
           if (err instanceof ApiError && err.status === 404) {
@@ -121,10 +150,34 @@ function ContractDetailContent({ id }: { id: string }) {
   useEffect(() => {
     let cancelled = false;
 
+    async function loadTrend() {
+      setTrendLoading(true);
+      try {
+        const data = await getResourceTrend(id, 30);
+        if (!cancelled) setTrend(data);
+      } catch {
+        // non-critical
+      } finally {
+        if (!cancelled) setTrendLoading(false);
+      }
+    }
+
+    loadTrend();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+
     async function loadEvents() {
       setEventsLoading(true);
       try {
-        const data = await getContractEvents(id, { limit: 50 });
+        const data = await getContractEvents(id, {
+          limit: 50,
+          in_successful_call: showFailedOnly ? false : undefined,
+        });
         if (!cancelled) {
           setEvents(data.events);
           setEventsCursor(data.cursor);
@@ -141,7 +194,7 @@ function ContractDetailContent({ id }: { id: string }) {
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, showFailedOnly]);
 
   useEffect(() => {
     let cancelled = false;
@@ -172,19 +225,26 @@ function ContractDetailContent({ id }: { id: string }) {
   const handleLoadMoreEvents = useCallback(async () => {
     if (!eventsCursor) return;
     try {
-      const data = await getContractEvents(id, { cursor: eventsCursor, limit: 50 });
+      const data = await getContractEvents(id, {
+        cursor: eventsCursor,
+        limit: 50,
+        in_successful_call: showFailedOnly ? false : undefined,
+      });
       setEvents((prev) => [...prev, ...data.events]);
       setEventsCursor(data.cursor);
       setEventsHasMore(data.has_more);
     } catch {
       // non-critical
     }
-  }, [id, eventsCursor]);
+  }, [id, eventsCursor, showFailedOnly]);
 
   const handleLoadMoreStorage = useCallback(async () => {
     if (!storageCursor) return;
     try {
-      const data = await getContractStorage(id, { cursor: storageCursor, limit: 100 });
+      const data = await getContractStorage(id, {
+        cursor: storageCursor,
+        limit: 100,
+      });
       setStorage((prev) => [...prev, ...data.entries]);
       setStorageCursor(data.cursor);
       setStorageHasMore(data.has_more);
@@ -192,6 +252,46 @@ function ContractDetailContent({ id }: { id: string }) {
       // non-critical
     }
   }, [id, storageCursor]);
+
+  const handleAddTag = useCallback(
+    async (tag: string) => {
+      setTagSaving(true);
+      setTagError(null);
+      try {
+        const res = await addContractTag(id, tag, getUserId());
+        setTags(res.tags ?? []);
+      } catch (err) {
+        setTagError(
+          err instanceof ApiError && err.status === 401
+            ? "You need a contributor identity to edit tags."
+            : "Failed to add tag."
+        );
+      } finally {
+        setTagSaving(false);
+      }
+    },
+    [id]
+  );
+
+  const handleRemoveTag = useCallback(
+    async (tag: string) => {
+      setTagSaving(true);
+      setTagError(null);
+      try {
+        await removeContractTag(id, tag, getUserId());
+        setTags((prev) => prev.filter((t) => t !== tag));
+      } catch (err) {
+        setTagError(
+          err instanceof ApiError && err.status === 401
+            ? "You need a contributor identity to edit tags."
+            : "Failed to remove tag."
+        );
+      } finally {
+        setTagSaving(false);
+      }
+    },
+    [id]
+  );
 
   if (contractLoading) {
     return (
@@ -266,6 +366,8 @@ function ContractDetailContent({ id }: { id: string }) {
           >
             {contract?.status}
           </span>
+          <AddToGroup contractId={id} />
+          <VerifiedBadge contractId={id} />
         </div>
         {contract?.sync && (
           <div className="mt-1 flex gap-4 text-xs text-[var(--color-text-secondary)]">
@@ -274,11 +376,20 @@ function ContractDetailContent({ id }: { id: string }) {
               Last ledger: {contract.sync.last_ledger.toLocaleString()}
             </span>
             <span>
-              Last sync:{" "}
-              {new Date(contract.sync.last_run_at).toLocaleString()}
+              Last sync: {new Date(contract.sync.last_run_at).toLocaleString()}
             </span>
           </div>
         )}
+        <div className="mt-3 max-w-lg">
+          <TagInput
+            tags={tags}
+            onAdd={handleAddTag}
+            onRemove={handleRemoveTag}
+            disabled={tagSaving}
+            error={tagError}
+            placeholder="Add a tag (prod, staging…)"
+          />
+        </div>
       </header>
 
       <section className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -340,14 +451,27 @@ function ContractDetailContent({ id }: { id: string }) {
       </section>
 
       <section className="mb-8">
-        <div className="mb-4 flex items-center gap-3">
-          <h2 className="text-xl font-semibold">Events</h2>
-          {isStreamConnected && (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-green-900/40 px-2.5 py-0.5 text-xs font-medium text-green-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
-              Live
-            </span>
-          )}
+        <div className="mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-semibold">Events</h2>
+            {isStreamConnected && (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-green-900/40 px-2.5 py-0.5 text-xs font-medium text-green-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
+                Live
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowFailedOnly(!showFailedOnly)}
+            className={`rounded-full px-3 py-1 text-sm font-medium transition-colors ${
+              showFailedOnly
+                ? "bg-red-500/20 text-red-500 hover:bg-red-500/30"
+                : "bg-[var(--color-bg-card)] text-[var(--color-text-secondary)] hover:bg-[var(--color-border)] hover:text-[var(--color-text-primary)]"
+            }`}
+          >
+            Failed Only
+          </button>
         </div>
         {eventsLoading ? (
           <TableSkeleton />
@@ -358,6 +482,16 @@ function ContractDetailContent({ id }: { id: string }) {
             hasMore={eventsHasMore}
           />
         )}
+      </section>
+
+      <section className="mb-8">
+        <h2 className="mb-4 text-xl font-semibold">Call trace</h2>
+        <CallTracePanel initialTxHash={events[0]?.tx_hash} />
+      </section>
+
+      <section className="mb-8">
+        <h2 className="mb-4 text-xl font-semibold">Notes</h2>
+        <ContractNotesPanel contractId={id} />
       </section>
 
       <section className="mb-8">
@@ -372,6 +506,16 @@ function ContractDetailContent({ id }: { id: string }) {
             hasMore={storageHasMore}
           />
         )}
+      </section>
+
+      <section className="mb-8" id="changelog">
+        <h2 className="mb-4 text-xl font-semibold">Changelog</h2>
+        <ContractChangelogPanel contractId={id} />
+      </section>
+
+      <section className="mb-8">
+        <h2 className="mb-4 text-xl font-semibold">Summary</h2>
+        <ContractSummaryCard contractId={id} />
       </section>
 
       <section className="mb-8">
